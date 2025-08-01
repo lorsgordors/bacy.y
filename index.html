@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <title>BTC com MACD e Média Móvel - Modo de Análise Alternável</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background-color: #121212;
+      color: white;
+      font-family: Arial, sans-serif;
+      text-align: center;
+    }
+    #btcChart {
+      width: 90vw;
+      height: 70vh;
+      max-width: 1200px;
+      margin: 0 auto 20px auto;
+      background-color: #1e1e1e;
+      border-radius: 10px;
+      padding: 10px;
+    }
+    #lucro {
+      font-size: 18px;
+      color: #00ff00;
+      margin-top: 10px;
+      white-space: pre-wrap;
+      text-align: left;
+      max-width: 1200px;
+      margin: auto;
+      min-height: 150px;
+    }
+    #controls {
+      margin-bottom: 15px;
+    }
+    input, button {
+      padding: 8px 12px;
+      font-size: 16px;
+      border-radius: 6px;
+      border: none;
+      margin: 5px;
+    }
+    #periodoInput, #volInput {
+      width: 60px;
+      text-align: center;
+    }
+    #btnInvert {
+      background-color: #007bff;
+      color: white;
+      cursor: pointer;
+    }
+    #btnModo {
+      background-color: #ff9900;
+      color: black;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h1>Gráfico BTC com Análise MACD ou Média Móvel (Alternável)</h1>
+
+  <div id="controls">
+    <label>Média Móvel:</label>
+    <input type="number" id="periodoInput" value="2" min="1" />
+    <label>ATR mínimo:</label>
+    <input type="number" id="volInput" value="10" min="0" step="0.1" />
+    <button id="btnAtualizar">Atualizar</button>
+    <button id="btnInvert">Inverter Sinais</button>
+    <button id="btnModo">Modo: MACD</button>
+  </div>
+
+  <canvas id="btcChart"></canvas>
+  <div id="lucro">Carregando dados...</div>
+
+  <script>
+    const ctx = document.getElementById("btcChart").getContext("2d");
+    let chart;
+    let dadosBrutos = null;
+    let sinaisInvertidos = false;
+    let labelsGlobais = null;
+    let closesGlobais = null;
+    let highsGlobais = null;
+    let lowsGlobais = null;
+    let periodoMediaMovel = 2;
+    let atrMinimo = 10;
+    let modoAnalise = "macd"; // 'macd' ou 'mmPreco'
+
+    function calcularSMA(closes, periodo) {
+      let sma = [];
+      for (let i = periodo - 1; i < closes.length; i++) {
+        let soma = 0;
+        for (let j = 0; j < periodo; j++) {
+          soma += closes[i - j];
+        }
+        sma[i] = soma / periodo;
+      }
+      return sma;
+    }
+
+    function calcularEMA(array, periodo) {
+      const k = 2 / (periodo + 1);
+      let emaArray = [];
+      let ema = array.slice(0, periodo).reduce((a,b) => a+b) / periodo;
+      emaArray[periodo - 1] = ema;
+      for (let i = periodo; i < array.length; i++) {
+        ema = array[i] * k + ema * (1 - k);
+        emaArray[i] = ema;
+      }
+      return emaArray;
+    }
+
+    function calcularATR(highs, lows, closes, periodo = 14) {
+      let trs = [0];
+      for (let i = 1; i < closes.length; i++) {
+        const high = highs[i];
+        const low = lows[i];
+        const prevClose = closes[i - 1];
+        const tr = Math.max(
+          high - low,
+          Math.abs(high - prevClose),
+          Math.abs(low - prevClose)
+        );
+        trs.push(tr);
+      }
+      return calcularEMA(trs, periodo);
+    }
+
+    function calcularMACD(closes) {
+      const ema12 = calcularEMA(closes, 12);
+      const ema26 = calcularEMA(closes, 26);
+      let macd = [];
+      for (let i = 0; i < closes.length; i++) {
+        if (ema12[i] !== undefined && ema26[i] !== undefined) {
+          macd[i] = ema12[i] - ema26[i];
+        } else {
+          macd[i] = undefined;
+        }
+      }
+      const linhaSinal = calcularEMA(macd.filter(x => x !== undefined), 9);
+      let sinalCompleto = [];
+      const diff = macd.length - linhaSinal.length;
+      for (let i = 0; i < diff; i++) sinalCompleto[i] = undefined;
+      for (let i = 0; i < linhaSinal.length; i++) sinalCompleto[diff + i] = linhaSinal[i];
+      return { macd, sinal: sinalCompleto };
+    }
+
+    function gerarSinaisMACD(macd, sinal, atr, atrLimite, inverter = false) {
+      let sinais = [];
+      for (let i = 1; i < macd.length; i++) {
+        if (macd[i-1] === undefined || sinal[i-1] === undefined || atr[i] < atrLimite) {
+          sinais[i] = null;
+          continue;
+        }
+        if (macd[i-1] < sinal[i-1] && macd[i] > sinal[i]) sinais[i] = inverter ? "sell" : "buy";
+        else if (macd[i-1] > sinal[i-1] && macd[i] < sinal[i]) sinais[i] = inverter ? "buy" : "sell";
+        else sinais[i] = null;
+      }
+      return sinais;
+    }
+
+    // Nova função para sinais por cruzamento do preço com a média móvel
+    function gerarSinaisMediaPreco(closes, sma, inverter = false) {
+      let sinais = [];
+      for (let i = 1; i < closes.length; i++) {
+        if (sma[i-1] === undefined || sma[i] === undefined) {
+          sinais[i] = null;
+          continue;
+        }
+        // Cruzamento preço sobe acima da média -> compra
+        if (closes[i-1] < sma[i-1] && closes[i] > sma[i]) {
+          sinais[i] = inverter ? "sell" : "buy";
+        }
+        // Cruzamento preço cai abaixo da média -> venda
+        else if (closes[i-1] > sma[i-1] && closes[i] < sma[i]) {
+          sinais[i] = inverter ? "buy" : "sell";
+        }
+        else {
+          sinais[i] = null;
+        }
+      }
+      return sinais;
+    }
+
+    function calcularLucroDetalhado(signals, closes, labels) {
+      let lucroTotal = 0;
+      let precoCompra = null;
+      let indiceCompra = null;
+      let detalhes = "";
+      let operacao = 0;
+      let positivos = 0;
+      let negativos = 0;
+
+      for (let i = 0; i < signals.length; i++) {
+        if (signals[i] === "buy" && precoCompra === null) {
+          precoCompra = closes[i];
+          indiceCompra = i;
+        } else if (signals[i] === "sell" && precoCompra !== null) {
+          operacao++;
+          const precoVenda = closes[i];
+          const lucro = (precoVenda - precoCompra) / precoCompra;
+          lucroTotal += lucro;
+
+          const dataCompra = new Date(labels[indiceCompra].split("/").reverse().join("-"));
+          const dataVenda = new Date(labels[i].split("/").reverse().join("-"));
+          const diffTime = Math.abs(dataVenda - dataCompra);
+          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+          detalhes += Operação ${operacao}: Compra a ${precoCompra.toFixed(2)} (${labels[indiceCompra]}), Venda a ${precoVenda.toFixed(2)} (${labels[i]}), Lucro: ${(lucro * 100).toFixed(2)}%, Duração: ${diffDays} dias\n;
+
+          if (lucro > 0) positivos++;
+          else if (lucro < 0) negativos++;
+          precoCompra = null;
+          indiceCompra = null;
+        }
+      }
+      if (precoCompra !== null) {
+        const precoVenda = closes[closes.length - 1];
+        const lucro = (precoVenda - precoCompra) / precoCompra;
+        operacao++;
+
+        const dataCompra = new Date(labels[indiceCompra].split("/").reverse().join("-"));
+        const dataVenda = new Date(labels[labels.length - 1].split("/").reverse().join("-"));
+        const diffTime = Math.abs(dataVenda - dataCompra);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        detalhes += Operação ${operacao} (fechada no final): Compra a ${precoCompra.toFixed(2)} (${labels[indiceCompra]}), Venda a ${precoVenda.toFixed(2)} (${labels[labels.length - 1]}), Lucro: ${(lucro * 100).toFixed(2)}%, Duração: ${diffDays} dias\n;
+
+        lucroTotal += lucro;
+        if (lucro > 0) positivos++;
+        else if (lucro < 0) negativos++;
+      }
+      detalhes += \nLucro Total Simulado: ${(lucroTotal * 100).toFixed(2)}%;
+      detalhes += \n\nOperações Positivas: ${positivos};
+      detalhes += \nOperações Negativas: ${negativos};
+      return { texto: detalhes, positivos, negativos };
+    }
+
+    function desenharGrafico(labels, closes, signals, sma) {
+      const pontos = signals.map((s, i) => {
+        if (s === "buy") return { x: i, y: closes[i], type: "triangle", color: "green" };
+        if (s === "sell") return { x: i, y: closes[i], type: "rect", color: "red" };
+        return null;
+      }).filter(Boolean);
+
+      if (chart) chart.destroy();
+
+      chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Preço BTC/USDT",
+              data: closes,
+              borderColor: "#00bcd4",
+              pointRadius: 0,
+              tension: 0.3,
+            },
+            {
+              label: Média Móvel (${periodoMediaMovel}),
+              data: sma,
+              borderColor: "#ffaa00",
+              borderWidth: 2,
+              pointRadius: 0,
+              tension: 0.3,
+            },
+            ...pontos.map(p => ({
+              label: p.type === "triangle" ? "Compra" : "Venda",
+              data: [{ x: labels[p.x], y: p.y }],
+              pointStyle: p.type,
+              borderColor: p.color,
+              backgroundColor: p.color,
+              pointRadius: 7,
+              type: "line",
+              showLine: false,
+            })),
+          ]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            x: { ticks: { color: "white" }, grid: { color: "#333" } },
+            y: { ticks: { color: "white" }, grid: { color: "#333" } }
+          },
+          plugins: {
+            legend: { labels: { color: "white" } }
+          }
+        }
+      });
+    }
+
+    function atualizarTela() {
+      if (!dadosBrutos) return;
+
+      const sma = calcularSMA(closesGlobais, periodoMediaMovel);
+      const atr = calcularATR(highsGlobais, lowsGlobais, closesGlobais);
+
+      let signals;
+      if (modoAnalise === "macd") {
+        const { macd, sinal } = calcularMACD(sma);
+        signals = gerarSinaisMACD(macd, sinal, atr, atrMinimo, sinaisInvertidos);
+      } else if (modoAnalise === "mmPreco") {
+        signals = gerarSinaisMediaPreco(closesGlobais, sma, sinaisInvertidos);
+      }
+
+      desenharGrafico(labelsGlobais, closesGlobais, signals, sma);
+      const resultado = calcularLucroDetalhado(signals, closesGlobais, labelsGlobais);
+
+      const linhas = resultado.texto.split("\n");
+      const linhasColoridas = linhas.map((linha) => {
+        const matchLucro = linha.match(/Lucro: ([+-]?[0-9]*\.?[0-9]+)%/);
+        if (matchLucro) {
+          const valorLucro = parseFloat(matchLucro[1]);
+          const cor = valorLucro >= 0 ? "#00ff00" : "#ff3333";
+          return <span style="color:${cor}">${linha}</span>;
+        }
+        if (linha.startsWith("Lucro Total Simulado:")) {
+          const valorTotal = parseFloat(linha.split(": ")[1]);
+          const corTotal = valorTotal >= 0 ? "#00ff00" : "#ff3333";
+          return <strong style="color:${corTotal}">${linha}</strong>;
+        }
+        return linha;
+      });
+      document.getElementById("lucro").innerHTML = linhasColoridas.join("<br>");
+    }
+
+    function fetchData() {
+      fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=365")
+        .then(res => res.json())
+        .then(data => {
+          dadosBrutos = data;
+          labelsGlobais = data.map(c => {
+            const date = new Date(c[0]);
+            return date.toLocaleDateString('pt-BR'); // dd/mm/aaaa
+          });
+          closesGlobais = data.map(c => parseFloat(c[4]));
+          highsGlobais = data.map(c => parseFloat(c[2]));
+          lowsGlobais = data.map(c => parseFloat(c[3]));
+          atualizarTela();
+        });
+    }
+
+    document.getElementById("btnInvert").addEventListener("click", () => {
+      sinaisInvertidos = !sinaisInvertidos;
+      atualizarTela();
+    });
+
+    document.getElementById("btnAtualizar").addEventListener("click", () => {
+      const novoPeriodo = parseInt(document.getElementById("periodoInput").value);
+      const novaVol = parseFloat(document.getElementById("volInput").value);
+      if (novoPeriodo >= 1) {
+        periodoMediaMovel = novoPeriodo;
+        atrMinimo = novaVol;
+        atualizarTela();
+      } else {
+        alert("Escolha um valor maior ou igual a 1.");
+      }
+    });
+
+    document.getElementById("btnModo").addEventListener("click", () => {
+      modoAnalise = modoAnalise === "macd" ? "mmPreco" : "macd";
+      document.getElementById("btnModo").textContent = modoAnalise === "macd" ? "Modo: MACD" : "Modo: Média Móvel/Preço";
+      atualizarTela();
+    });
+
+    fetchData();
+    setInterval(fetchData, 3600000); // Atualiza a cada 1 hora
+  </script>
+</body>
+</html>
